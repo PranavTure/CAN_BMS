@@ -1,24 +1,21 @@
-/*
- *
- * TRANSMITTING ID:
- * 0x333 -> ask for choice
- * 0x444 -> send bms data
- *
- *
- * RECEIVERING ID:
- * 0x111 -> get choice
- * 0x222 -> get acceleration
- * 0x555 -> get custom init data as per structure
- */
-
 
 
 
 /*
- *      BMS SIMULAITON OVER CAN
+ *    when data received by the bms
+ *
+ *     0x111 ;  receive choice
+ *     0x222 :   get acceleration
+ *
+ *
+ *	 when transmitted by the bms
+ *
+ *     0x777 : revert back the received data
+ *     0x333 : send the first message
+ *     0x123 : battery configurations
+ *     0x234 : send battery status
+ *     0x345 : input acceleration value (0 - 100 mapped 0 - 65535)
  */
-
-
 
 
 
@@ -52,30 +49,11 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
-CAN_HandleTypeDef hcan1;
-
-TIM_HandleTypeDef htim4;
-
-/* USER CODE BEGIN PV */
 // DECLARATION OF USER CONFIG FUNCTIONS;
 
 typedef struct {
 	float battery_capacity_ah;
-	int   num_cells;
+	float num_cells;
 	float cell_capacity_ah[3];
 	float cell_power_rating[3];
 	float initial_soc[3];
@@ -109,6 +87,27 @@ typedef struct {
 } InputData;
 
 InputData inputdata;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define LED GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+CAN_HandleTypeDef hcan1;
+
+TIM_HandleTypeDef htim4;
+
+/* USER CODE BEGIN PV */
+uint8_t txData[8];
+uint8_t rxData[8];
+uint8_t init_complete = 0x00;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -122,7 +121,11 @@ void default_init(void);
 void calculate_outputs(void);
 void send_battery_status(BatteryStatus *status);
 void send_first_message(void);
+
 void test_pwm(void);
+
+void send_rx_data(void);
+void send_struct(uint32_t id, void *data, uint16_t size);
 
 void choice_handler(uint8_t choice);
 void custom_input_handler(void);
@@ -130,9 +133,6 @@ void custom_input_handler(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-uint8_t txData[8];
-uint8_t rxData[8];
 
 /* USER CODE END 0 */
 
@@ -170,30 +170,32 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
-
-  /* USER CODE END 2 */
   can_filter_config();
   HAL_CAN_Start(&hcan1);
-  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING);
+  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+
+  test_pwm();
 
   send_first_message();
+  /* USER CODE END 2 */
 
-  // Default initialization
-  default_init();
-
-  // Main loop with delays
-  uint32_t last_time = HAL_GetTick();
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
   uint32_t new_time = 0;
-  while (1) {
-
+  uint32_t last_time = 0;
+  while (1)
+  {
+    /* USER CODE END WHILE */
 	  new_time = HAL_GetTick();
-      calculate_outputs();
-
-      if (new_time - last_time >= 1500) {
-    	  send_battery_status(&battery_status);
-    	  last_time = new_time;
-      }
+	  calculate_outputs();
+	  if (new_time - last_time >= 5000) {
+		  if(init_complete) send_struct(0x234, &battery_status, sizeof(battery_status));
+		  else send_first_message();
+	  }
+	  last_time = new_time;
+    /* USER CODE BEGIN 3 */
   }
+  /* USER CODE END 3 */
 }
 
 /**
@@ -293,6 +295,7 @@ static void can_filter_config() {
     HAL_CAN_ConfigFilter(&hcan1, &filter);
 }
 
+
 /**
   * @brief TIM4 Initialization Function
   * @param None
@@ -376,6 +379,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -383,9 +390,60 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-void send_first_message() {
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
+    CAN_RxHeaderTypeDef rxHeader;
+
+    if(HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
+
+        switch (rxHeader.StdId) {
+
+			case 0x111: {                              		// 0X111   to choose CUSTOM or DEFAULT inits
+				send_rx_data();
+				choice_handler(rxData[0]);
+				break;
+			}
+
+
+            case 0x222: {                                  // 0X222 GIVES THE ACCELERATION VALUE OF THE VEHICLE
+            	send_rx_data();
+            	inputdata.acceleration = rxData[0];
+                uint32_t pwm_val = (uint32_t)((inputdata.acceleration/100)*65535);
+                __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, pwm_val);
+                send_struct(0x345, &inputdata, sizeof(inputdata));
+                break;
+            }
+
+            /*
+             * case 0x555: {                                  // 0x555 to get custom values for the initialization of the bms.
+            	custom_input_handler();
+            	break;
+			}
+             */
+        }
+       HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+    }
+    else {
+    	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+    	HAL_Delay(1000);
+    	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+    }
+}
+
+
+void test_pwm(){
+	for(int i=0; i<65535; i+=500) {
+		__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, i);
+		HAL_Delay(8);
+	}
+	for(int i=65535; i>0; i-=500) {
+		__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, i);
+		HAL_Delay(8);
+	}
+}
+
+void send_first_message() {				// first message to get the choice selection
 	CAN_TxHeaderTypeDef txheader;
-	uint8_t txChoiceData[8] = {1, 12, 2, 13, 0, 0, 0, 0};
+	uint8_t txChoiceData[8] = {1, 12, 2, 13, 3, 15, 0, 0};
 	uint32_t txMailbox = 0;
 
 	txheader.StdId = 0x333;                      // 0x333 TO send choice to the receiver
@@ -399,33 +457,50 @@ void send_first_message() {
 }
 
 
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
-    CAN_RxHeaderTypeDef rxHeader;
+void send_rx_data() {
+
+	for(int i=0; i<8; i++) {
+		txData[i] = rxData[i];
+	}
+
+	CAN_TxHeaderTypeDef txHeader;
+
+	uint32_t txMailbox;
 
 
-    if(HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
+	txHeader.StdId = 0x777;
+	txHeader.IDE = CAN_ID_STD;
+	txHeader.RTR = CAN_RTR_DATA;
+	txHeader.DLC = 8;
 
-        switch (rxHeader.StdId) {
+	 if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) > 0) {
 
-			case 0x111: {                              		// 0X111   to choose CUSTOM or DEFAULT inits
-				choice_handler(rxData[0]);
-				break;
-			}
+		 if (HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox) == HAL_OK) {
+			 HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+		 }
 
-            case 0x222: {                                  // 0X222 GIVES THE ACCELERATION VALUE OF THE VEHICLE
-                memcpy(&inputdata.acceleration, &rxData[0], sizeof(float));
-                uint32_t led_display = (uint32_t)((inputdata.acceleration/100)*65535);
-                __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, led_display);
-                break;
-            }
+		 else {
+		    HAL_GPIO_TogglePin(GPIOD, LED);
+		    HAL_Delay(1000);
+		    HAL_GPIO_TogglePin(GPIOD, LED);
+		 }
+	 }
+}
 
-            case 0x555: {                                  // 0x555 to get custom values for the initialization of the bms.
-            	custom_input_handler();
-            	break;
-			}
-        }
-       HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
-    }
+
+void choice_handler(uint8_t choice){
+	if (choice == 1) {
+		init_complete = 0;
+	}
+	else if (choice == 2) {
+		default_init();
+		init_complete = 1;
+		send_struct(0x123, &battery_config, sizeof(battery_config));
+	}
+	else if (choice == 3) {
+		//send_first_message();
+		init_complete = 0;
+	}
 }
 
 
@@ -460,6 +535,30 @@ void default_init() {                                         // CODE FOR DEFAUL
 	battery_status.pack_soh = 100.0f;
 	battery_status.pack_temperature = 27.0f;
 }
+
+
+void send_struct(uint32_t id, void *data, uint16_t size) {
+    CAN_TxHeaderTypeDef txHeader;
+    uint32_t txMailbox;
+    uint8_t txData[8];
+    uint8_t *ptr = (uint8_t*)data;
+    uint8_t num_frames = (size + 7) / 8;
+
+    txHeader.StdId = id;
+    txHeader.IDE = CAN_ID_STD;
+    txHeader.RTR = CAN_RTR_DATA;
+    txHeader.DLC = 8;
+
+    for (uint8_t i = 0; i < num_frames; i++) {
+        uint8_t len = (i == num_frames - 1) ? (size - i * 8) : 8;
+        memcpy(txData, ptr + (i * 8), len);
+        if (len < 8) memset(txData + len, 0, 8 - len);
+
+        while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0);
+        HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
+    }
+}
+
 
 void calculate_outputs() {
     static uint32_t last_degradation_tick = 0;
@@ -512,144 +611,20 @@ void calculate_outputs() {
         last_temp_tick = 0;
     }
 }
-
-
-void send_battery_status(BatteryStatus *status) {
-    CAN_TxHeaderTypeDef txHeader;
-
-    uint32_t txMailbox;
-    static uint8_t tx_error_cal = 0;
-
-    txHeader.StdId = 0x444;
-    txHeader.IDE = CAN_ID_STD;
-    txHeader.RTR = CAN_RTR_DATA;
-    txHeader.DLC = 8;
-
-    uint8_t *ptr = (uint8_t*)status;
-    uint16_t total_size = sizeof(BatteryStatus);
-    uint8_t num_frames = (total_size + 7) / 8;   // ceil division
-
-    for (uint8_t i = 0; i < num_frames; i++) {
-        uint8_t len = (i == num_frames - 1) ? (total_size - i * 8) : 8;
-        memcpy(txData, ptr + (i * 8), len);
-
-        // Fill remaining bytes with 0 (optional)
-        if (len < 8) memset(txData + len, 0, 8 - len);
-
-        if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) > 0) {
-            if (HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox) != HAL_OK) {
-                tx_error_cal++;
-                if (tx_error_cal >= 10) Error_Handler();
-            } else {
-                tx_error_cal = 0;
-            }
-        } else {
-            tx_error_cal++;
-            if (tx_error_cal >= 10) Error_Handler();
-        }
-
-        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_13);
-    }
-}
-
-
-// Track state of receiving battery config
-static uint8_t battery_config_frame_count = 0;
-static uint8_t expecting_custom_config = 0;
-
-void choice_handler(uint8_t choice) {
-	if(rxData[0] == 1) {
-		expecting_custom_config = 1;
-		battery_config_frame_count = 0;
-	}
-	else if(rxData[0] == 2) {
-		default_init();
-		expecting_custom_config = 0;
-	}
-	else if(rxData[0] == 3) send_first_message();
-}
-
-
-void custom_input_handler(void) {
-	if(!expecting_custom_config) return;
-	switch(battery_config_frame_count)
-	{
-		case 0:
-			memcpy(&battery_config.battery_capacity_ah, &rxData[0], sizeof(float));
-			battery_config.num_cells = rxData[4];
-			break;
-
-		case 1:
-			memcpy(&battery_config.cell_capacity_ah[0], &rxData[0], sizeof(float));
-			memcpy(&battery_config.cell_capacity_ah[1], &rxData[4], sizeof(float));
-			break;
-
-		case 2:
-			memcpy(&battery_config.cell_capacity_ah[2], &rxData[0], sizeof(float));
-			memcpy(&battery_config.cell_power_rating[0], &rxData[4], sizeof(float));
-			break;
-
-		case 3:
-			memcpy(&battery_config.cell_power_rating[1], &rxData[0], sizeof(float));
-			memcpy(&battery_config.cell_power_rating[2], &rxData[4], sizeof(float));
-			break;
-
-		case 4:
-			memcpy(&battery_config.initial_soc[0], &rxData[0], sizeof(float));
-			memcpy(&battery_config.initial_soc[1], &rxData[4], sizeof(float));
-			break;
-
-		case 5:
-			memcpy(&battery_config.initial_soc[2], &rxData[0], sizeof(float));
-			memcpy(&battery_config.initial_soh[0], &rxData[4], sizeof(float));
-			break;
-
-		case 6:
-			memcpy(&battery_config.initial_soh[1], &rxData[0], sizeof(float));
-			memcpy(&battery_config.initial_soh[2], &rxData[4], sizeof(float));
-			break;
-
-		case 7:
-			memcpy(&battery_config.degradation_rate[0], &rxData[0], sizeof(float));
-			memcpy(&battery_config.degradation_rate[1], &rxData[4], sizeof(float));
-			break;
-
-		case 8:
-			memcpy(&battery_config.degradation_rate[2], &rxData[0], sizeof(float));
-			memcpy(&battery_config.max_discharge_current, &rxData[4], sizeof(float));
-			break;
-
-		case 9:
-			memcpy(&battery_config.max_charge_current, &rxData[0], sizeof(float));
-			expecting_custom_config = 0;
-			break;
-
-		default:
-			break;
-	}
-
-	battery_config_frame_count++;
-	if(battery_config_frame_count > 9) {
-		battery_config_frame_count = 0;
-	}
-}
-
-
-// USER CODE END 4
+/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
   */
-
-#define LED GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14
-
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-	HAL_GPIO_TogglePin(GPIOD, 14);
-	HAL_Delay(250);
+  while(1) {
+	  HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14);
+	  HAL_Delay(250);
+  }
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
