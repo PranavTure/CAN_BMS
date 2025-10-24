@@ -1,5 +1,15 @@
-
-
+/*
+ *
+ * TRANSMITTING ID:
+ * 0x333 -> ask for choice
+ * 0x444 -> send bms data
+ *
+ *
+ * RECEIVERING ID:
+ * 0x111 -> get choice
+ * 0x222 -> get acceleration
+ * 0x555 -> get custom init data as per structure
+ */
 
 
 
@@ -113,10 +123,16 @@ void calculate_outputs(void);
 void send_battery_status(BatteryStatus *status);
 void send_first_message(void);
 void test_pwm(void);
+
+void choice_handler(uint8_t choice);
+void custom_input_handler(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+uint8_t txData[8];
+uint8_t rxData[8];
 
 /* USER CODE END 0 */
 
@@ -249,7 +265,7 @@ static void MX_CAN1_Init(void)
   hcan1.Init.TimeTriggeredMode = DISABLE;
   hcan1.Init.AutoBusOff = DISABLE;
   hcan1.Init.AutoWakeUp = DISABLE;
-  hcan1.Init.AutoRetransmission = DISABLE;
+  hcan1.Init.AutoRetransmission = ENABLE;
   hcan1.Init.ReceiveFifoLocked = DISABLE;
   hcan1.Init.TransmitFifoPriority = DISABLE;
   if (HAL_CAN_Init(&hcan1) != HAL_OK)
@@ -268,18 +284,12 @@ static void can_filter_config() {
     filter.FilterActivation = ENABLE;
     filter.FilterBank = 0;
     filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-    filter.FilterIdHigh = 0x111 << 5;
+    filter.FilterIdHigh = 0;
     filter.FilterIdLow = 0;
-    filter.FilterMaskIdHigh = 0x7FF << 5;
+    filter.FilterMaskIdHigh = 0;
     filter.FilterMaskIdLow = 0;
     filter.FilterMode = CAN_FILTERMODE_IDMASK;
     filter.FilterScale = CAN_FILTERSCALE_32BIT;
-    HAL_CAN_ConfigFilter(&hcan1, &filter);
-
-    filter.FilterBank = 1;
-    filter.FilterFIFOAssignment = CAN_FILTER_FIFO1;
-    filter.FilterIdHigh = 0x222 << 5;
-    filter.FilterMaskIdHigh = 0x7FF << 5;
     HAL_CAN_ConfigFilter(&hcan1, &filter);
 }
 
@@ -375,123 +385,51 @@ static void MX_GPIO_Init(void)
 
 void send_first_message() {
 	CAN_TxHeaderTypeDef txheader;
-	uint8_t txData[8] = "1.C 2.D\n";
+	uint8_t txChoiceData[8] = {1, 12, 2, 13, 0, 0, 0, 0};
 	uint32_t txMailbox = 0;
 
-	txheader.StdId = 0x333;
+	txheader.StdId = 0x333;                      // 0x333 TO send choice to the receiver
 	txheader.IDE = CAN_ID_STD;
 	txheader.RTR = CAN_RTR_DATA;
 	txheader.DLC = 8;
 
-	if (HAL_CAN_AddTxMessage(&hcan1, &txheader, txData, &txMailbox) != HAL_OK) {
+	if (HAL_CAN_AddTxMessage(&hcan1, &txheader, txChoiceData, &txMailbox) != HAL_OK) {
 		Error_Handler();
 	}
 }
 
-// Track state of receiving battery config
-static uint8_t battery_config_frame_count = 0;
-static uint8_t expecting_custom_config = 0;
 
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
     CAN_RxHeaderTypeDef rxHeader;
-    uint8_t rxData[8];
+
 
     if(HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
 
         switch (rxHeader.StdId) {
 
-			case 0x111:
-			{
-				if(!expecting_custom_config) {
-					if(rxData[0] == 1) {
-						expecting_custom_config = 1;
-						battery_config_frame_count = 0;
-					}
-					else if(rxData[0] == 0) {
-						default_init();
-						expecting_custom_config = 0;
-					}
-					else {
-						send_first_message();
-					}
-				}
-				else {
-					switch(battery_config_frame_count)
-					{
-						case 0:
-							memcpy(&battery_config.battery_capacity_ah, &rxData[0], sizeof(float));
-							battery_config.num_cells = rxData[4];
-							break;
-
-						case 1:
-							memcpy(&battery_config.cell_capacity_ah[0], &rxData[0], sizeof(float));
-							memcpy(&battery_config.cell_capacity_ah[1], &rxData[4], sizeof(float));
-							break;
-
-						case 2:
-							memcpy(&battery_config.cell_capacity_ah[2], &rxData[0], sizeof(float));
-							memcpy(&battery_config.cell_power_rating[0], &rxData[4], sizeof(float));
-							break;
-
-						case 3:
-							memcpy(&battery_config.cell_power_rating[1], &rxData[0], sizeof(float));
-							memcpy(&battery_config.cell_power_rating[2], &rxData[4], sizeof(float));
-							break;
-
-						case 4:
-							memcpy(&battery_config.initial_soc[0], &rxData[0], sizeof(float));
-							memcpy(&battery_config.initial_soc[1], &rxData[4], sizeof(float));
-							break;
-
-						case 5:
-							memcpy(&battery_config.initial_soc[2], &rxData[0], sizeof(float));
-							memcpy(&battery_config.initial_soh[0], &rxData[4], sizeof(float));
-							break;
-
-						case 6:
-							memcpy(&battery_config.initial_soh[1], &rxData[0], sizeof(float));
-							memcpy(&battery_config.initial_soh[2], &rxData[4], sizeof(float));
-							break;
-
-						case 7:
-							memcpy(&battery_config.degradation_rate[0], &rxData[0], sizeof(float));
-							memcpy(&battery_config.degradation_rate[1], &rxData[4], sizeof(float));
-							break;
-
-						case 8:
-							memcpy(&battery_config.degradation_rate[2], &rxData[0], sizeof(float));
-							memcpy(&battery_config.max_discharge_current, &rxData[4], sizeof(float));
-							break;
-
-						case 9:
-							memcpy(&battery_config.max_charge_current, &rxData[0], sizeof(float));
-							expecting_custom_config = 0;
-							break;
-
-						default:
-							break;
-					}
-
-					battery_config_frame_count++;
-					if(battery_config_frame_count > 9) {
-						battery_config_frame_count = 0;
-					}
-				}
+			case 0x111: {                              		// 0X111   to choose CUSTOM or DEFAULT inits
+				choice_handler(rxData[0]);
 				break;
 			}
 
-            case 0x222:
-            {
+            case 0x222: {                                  // 0X222 GIVES THE ACCELERATION VALUE OF THE VEHICLE
                 memcpy(&inputdata.acceleration, &rxData[0], sizeof(float));
                 uint32_t led_display = (uint32_t)((inputdata.acceleration/100)*65535);
                 __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, led_display);
                 break;
             }
+
+            case 0x555: {                                  // 0x555 to get custom values for the initialization of the bms.
+            	custom_input_handler();
+            	break;
+			}
         }
+       HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
     }
 }
 
-void default_init() {
+
+void default_init() {                                         // CODE FOR DEFAULT INITIALIZATION OF THE BMS
 	battery_config.battery_capacity_ah = 100.0f;
 	battery_config.num_cells = 3;
 
@@ -575,37 +513,125 @@ void calculate_outputs() {
     }
 }
 
+
 void send_battery_status(BatteryStatus *status) {
-    static uint8_t tx_error_cal = 0;
-    CAN_TxHeaderTypeDef txheader;
-    uint8_t txData[8];
+    CAN_TxHeaderTypeDef txHeader;
+
     uint32_t txMailbox;
+    static uint8_t tx_error_cal = 0;
 
-    txheader.StdId = 0x444;
-    txheader.IDE = CAN_ID_STD;
-    txheader.RTR = CAN_RTR_DATA;
-    txheader.DLC = 8;
+    txHeader.StdId = 0x444;
+    txHeader.IDE = CAN_ID_STD;
+    txHeader.RTR = CAN_RTR_DATA;
+    txHeader.DLC = 8;
 
-    memcpy(&txData[0], &status->pack_soc, sizeof(float));
-    memcpy(&txData[4], &status->pack_soh, sizeof(float));
+    uint8_t *ptr = (uint8_t*)status;
+    uint16_t total_size = sizeof(BatteryStatus);
+    uint8_t num_frames = (total_size + 7) / 8;   // ceil division
 
-    // Check if at least one TX mailbox is free
-    if(HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) > 0) {
-        if(HAL_CAN_AddTxMessage(&hcan1, &txheader, txData, &txMailbox) != HAL_OK) {
-            tx_error_cal++;
-            if(tx_error_cal >= 10) {
-                Error_Handler();
+    for (uint8_t i = 0; i < num_frames; i++) {
+        uint8_t len = (i == num_frames - 1) ? (total_size - i * 8) : 8;
+        memcpy(txData, ptr + (i * 8), len);
+
+        // Fill remaining bytes with 0 (optional)
+        if (len < 8) memset(txData + len, 0, 8 - len);
+
+        if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) > 0) {
+            if (HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox) != HAL_OK) {
+                tx_error_cal++;
+                if (tx_error_cal >= 10) Error_Handler();
+            } else {
+                tx_error_cal = 0;
             }
         } else {
-            tx_error_cal = 0; // Reset error counter on successful send
+            tx_error_cal++;
+            if (tx_error_cal >= 10) Error_Handler();
         }
-    } else {
-        // Optional: increment error counter if no mailbox free
-        tx_error_cal++;
-        if(tx_error_cal >= 10) {
-            Error_Handler();
-        }
+
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_13);
     }
+}
+
+
+// Track state of receiving battery config
+static uint8_t battery_config_frame_count = 0;
+static uint8_t expecting_custom_config = 0;
+
+void choice_handler(uint8_t choice) {
+	if(rxData[0] == 1) {
+		expecting_custom_config = 1;
+		battery_config_frame_count = 0;
+	}
+	else if(rxData[0] == 2) {
+		default_init();
+		expecting_custom_config = 0;
+	}
+	else if(rxData[0] == 3) send_first_message();
+}
+
+
+void custom_input_handler(void) {
+	if(!expecting_custom_config) return;
+	switch(battery_config_frame_count)
+	{
+		case 0:
+			memcpy(&battery_config.battery_capacity_ah, &rxData[0], sizeof(float));
+			battery_config.num_cells = rxData[4];
+			break;
+
+		case 1:
+			memcpy(&battery_config.cell_capacity_ah[0], &rxData[0], sizeof(float));
+			memcpy(&battery_config.cell_capacity_ah[1], &rxData[4], sizeof(float));
+			break;
+
+		case 2:
+			memcpy(&battery_config.cell_capacity_ah[2], &rxData[0], sizeof(float));
+			memcpy(&battery_config.cell_power_rating[0], &rxData[4], sizeof(float));
+			break;
+
+		case 3:
+			memcpy(&battery_config.cell_power_rating[1], &rxData[0], sizeof(float));
+			memcpy(&battery_config.cell_power_rating[2], &rxData[4], sizeof(float));
+			break;
+
+		case 4:
+			memcpy(&battery_config.initial_soc[0], &rxData[0], sizeof(float));
+			memcpy(&battery_config.initial_soc[1], &rxData[4], sizeof(float));
+			break;
+
+		case 5:
+			memcpy(&battery_config.initial_soc[2], &rxData[0], sizeof(float));
+			memcpy(&battery_config.initial_soh[0], &rxData[4], sizeof(float));
+			break;
+
+		case 6:
+			memcpy(&battery_config.initial_soh[1], &rxData[0], sizeof(float));
+			memcpy(&battery_config.initial_soh[2], &rxData[4], sizeof(float));
+			break;
+
+		case 7:
+			memcpy(&battery_config.degradation_rate[0], &rxData[0], sizeof(float));
+			memcpy(&battery_config.degradation_rate[1], &rxData[4], sizeof(float));
+			break;
+
+		case 8:
+			memcpy(&battery_config.degradation_rate[2], &rxData[0], sizeof(float));
+			memcpy(&battery_config.max_discharge_current, &rxData[4], sizeof(float));
+			break;
+
+		case 9:
+			memcpy(&battery_config.max_charge_current, &rxData[0], sizeof(float));
+			expecting_custom_config = 0;
+			break;
+
+		default:
+			break;
+	}
+
+	battery_config_frame_count++;
+	if(battery_config_frame_count > 9) {
+		battery_config_frame_count = 0;
+	}
 }
 
 
@@ -622,7 +648,8 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-	HAL_GPIO_TogglePin(GPIOD, LED);
+	HAL_GPIO_TogglePin(GPIOD, 14);
+	HAL_Delay(250);
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
