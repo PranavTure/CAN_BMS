@@ -1,23 +1,44 @@
 
 
+// 						MESSAGE ID   :   TYPE OF DATA THEY CARRY
 
 /*
- *    when data received by the bms
+ * 		TRANSMISSIONS
  *
- *     0x111 ;  receive choice
- *     0x222 :   get acceleration
+ *		0x001 : Input acceleration structure
+ * 		0x111 : First choice message
+ * 		0x222 : Battery configurations
+ * 		0x333 : Battery Status
+ * 		0x444 : mirror Rx data
+ *
+ * 		0x201 : update temperature
+ * 		0x202 : update SOH
+ * 		0x203 : update SOC
+ *
+ * 		0x211 : update degradation_rate cell [0]
+ * 		0x212 : u d r cell[1]
+ * 		0x213 : udr cell[2]
  *
  *
- *	 when transmitted by the bms
  *
- *     0x777 : revert back the received data
- *     0x333 : send the first message
- *     0x123 : battery configurations
- *     0x234 : send battery status
- *     0x345 : input acceleration value (0 - 100 mapped 0 - 65535)
+ *
+ * 		RECEPTION
+ *
+ * 		0x555 : Receive user's choice
+ * 		0x666 : Acceleration
+ * 		0x777 : config data
+ *
+ *
+ * 		FAULT FLAG BIT MAPINGS
+ *
+ *     0th bit : LOW SOC < 20 %
+ *     1st bit : Over temperature > 60;
+ *     2nd bit : under temperature fault < 0
+ *     3rd bit : LOW SOH of battery < 70 %
+ *     4th bit : Over current fault (pack current > max discharge current)
+ *     5-6 th  : Indicate which cell has degraded beyond the limit
+ *     7th bit : general fault if any fault flag is set
  */
-
-
 
 
 
@@ -42,6 +63,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "string.h"
+#include "math.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -52,15 +74,31 @@
 // DECLARATION OF USER CONFIG FUNCTIONS;
 
 typedef struct {
-	float battery_capacity_ah;
-	float num_cells;
-	float cell_capacity_ah[3];
-	float cell_power_rating[3];
-	float initial_soc[3];
-	float initial_soh[3];
-	float degradation_rate[3];
-	float max_discharge_current;
-	float max_charge_current;
+    int battery_capacity_ah;
+    int num_cells;
+
+    int cell0_capacity_ah;
+    int cell1_capacity_ah;
+    int cell2_capacity_ah;
+
+    int cell0_power_rating;
+    int cell1_power_rating;
+    int cell2_power_rating;
+
+    int initial_soc0;
+    int initial_soc1;
+    int initial_soc2;
+
+    int initial_soh0;
+    int initial_soh1;
+    int initial_soh2;
+
+    int degradation_rate0;
+    int degradation_rate1;
+    int degradation_rate2;
+
+    int max_discharge_current;
+    int max_charge_current;
 } BatteryConfig;
 
 BatteryConfig battery_config;
@@ -68,25 +106,34 @@ BatteryConfig battery_config;
 // DECLARATION OF OUTPUT VARIABLES
 
 typedef struct {
-	float pack_soc;
-	float pack_soh;
-	float cell_soc[3];
-	float cell_soh[3];
-	float pack_current;
-	float pack_temperature;
-	float pack_range;
-	uint8_t fault_flags;
+    int pack_soc;
+    int pack_soh;
+
+    int cell0_soc;
+    int cell1_soc;
+    int cell2_soc;
+
+    int cell0_soh;
+    int cell1_soh;
+    int cell2_soh;
+
+    int pack_current;
+    int pack_temperature;
+    int pack_range;
+
+    uint32_t fault_flags;
 } BatteryStatus;
 
 BatteryStatus battery_status;
 
-// CONTINUOUS INPUTS VITUAL/USER
+// CONTINUOUS INPUTS VIRTUAL/USER
 
 typedef struct {
-	float acceleration;
+	int acceleration;
 } InputData;
 
 InputData inputdata;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -107,6 +154,7 @@ TIM_HandleTypeDef htim4;
 /* USER CODE BEGIN PV */
 uint8_t txData[8];
 uint8_t rxData[8];
+uint8_t temp_rxData[8];
 uint8_t init_complete = 0x00;
 /* USER CODE END PV */
 
@@ -119,7 +167,6 @@ static void MX_TIM4_Init(void);
 static void can_filter_config(void);
 void default_init(void);
 void calculate_outputs(void);
-void send_battery_status(BatteryStatus *status);
 void send_first_message(void);
 
 void test_pwm(void);
@@ -128,7 +175,10 @@ void send_rx_data(void);
 void send_struct(uint32_t id, void *data, uint16_t size);
 
 void choice_handler(uint8_t choice);
-void custom_input_handler(void);
+void custom_input_handler(uint8_t* rxdata);
+
+void update_cell_soh(void);
+void update_cell_soc(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -183,16 +233,24 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   uint32_t new_time = 0;
   uint32_t last_time = 0;
+  uint32_t config_counter = 0;
+  uint32_t config_counter_last = 0;
   while (1)
   {
     /* USER CODE END WHILE */
 	  new_time = HAL_GetTick();
 	  calculate_outputs();
-	  if (new_time - last_time >= 5000) {
-		  if(init_complete) send_struct(0x234, &battery_status, sizeof(battery_status));
-		  else send_first_message();
+	  if (new_time - last_time >= 2500) {
+		  if(init_complete) send_struct(0x333, &battery_status, sizeof(battery_status));
+		  else {
+			  config_counter = HAL_GetTick();
+			  if(config_counter - config_counter_last >= 10000){
+				  send_first_message();
+				  config_counter_last = config_counter;
+			  }
+		  }
+		  last_time = new_time;
 	  }
-	  last_time = new_time;
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -393,39 +451,70 @@ static void MX_GPIO_Init(void)
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
     CAN_RxHeaderTypeDef rxHeader;
 
-    if(HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
+    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
+
+        send_rx_data();
 
         switch (rxHeader.StdId) {
 
-			case 0x111: {                              		// 0X111   to choose CUSTOM or DEFAULT inits
-				send_rx_data();
-				choice_handler(rxData[0]);
-				break;
-			}
-
-
-            case 0x222: {                                  // 0X222 GIVES THE ACCELERATION VALUE OF THE VEHICLE
-            	send_rx_data();
-            	inputdata.acceleration = rxData[0];
-                uint32_t pwm_val = (uint32_t)((inputdata.acceleration/100)*65535);
-                __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, pwm_val);
-                send_struct(0x345, &inputdata, sizeof(inputdata));
+            case 0x555: {                                 // 0x555 : choose CUSTOM or DEFAULT init
+                choice_handler(rxData[0]);
                 break;
             }
 
-            /*
-             * case 0x555: {                                  // 0x555 to get custom values for the initialization of the bms.
-            	custom_input_handler();
-            	break;
-			}
-             */
+            case 0x666: {                                 // 0x666 : vehicle acceleration input
+                inputdata.acceleration = (int)rxData[0];
+                uint32_t pwm_val = (uint32_t)((inputdata.acceleration / 100.0f) * 65535);
+                __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, pwm_val);
+                send_struct(0x001, &inputdata, sizeof(inputdata));
+                break;
+            }
+
+            case 0x777: {                                 // 0x777 : custom initialization inputs
+                // memcpy(temp_rxData, rxData, 8);
+                // custom_input_handler(temp_rxData);
+                break;
+            }
+
+            case 0x201: {                                 // 0x201 : set pack temperature
+                battery_status.pack_temperature = (int)(rxData[0]);
+                break;
+            }
+
+            case 0x202: {                                 // 0x202 : set pack SOH
+                battery_status.pack_soc = (int)rxData[0];
+                update_cell_soh();
+                break;
+            }
+
+            case 0x203: {                                 // 0x203 : set pack SOC
+                battery_status.pack_soh = (int)rxData[0];
+                update_cell_soc();
+                break;
+            }
+
+            case 0x211: {                                 // 0x211 : set degradation rate for cell 0
+                memcpy(&battery_config.degradation_rate0, &rxData[0], sizeof(int));
+                break;
+            }
+
+            case 0x212: {                                 // 0x212 : set degradation rate for cell 1
+                memcpy(&battery_config.degradation_rate1, &rxData[0], sizeof(int));
+                break;
+            }
+
+            case 0x213: {                                 // 0x213 : set degradation rate for cell 2
+                memcpy(&battery_config.degradation_rate2, &rxData[0], sizeof(int));
+                break;
+            }
         }
-       HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
     }
     else {
-    	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
-    	HAL_Delay(1000);
-    	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+        HAL_Delay(1000);
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
     }
 }
 
@@ -446,7 +535,7 @@ void send_first_message() {				// first message to get the choice selection
 	uint8_t txChoiceData[8] = {1, 12, 2, 13, 3, 15, 0, 0};
 	uint32_t txMailbox = 0;
 
-	txheader.StdId = 0x333;                      // 0x333 TO send choice to the receiver
+	txheader.StdId = 0x111;                      // 0x111 TO send choice to the receiver
 	txheader.IDE = CAN_ID_STD;
 	txheader.RTR = CAN_RTR_DATA;
 	txheader.DLC = 8;
@@ -468,7 +557,7 @@ void send_rx_data() {
 	uint32_t txMailbox;
 
 
-	txHeader.StdId = 0x777;
+	txHeader.StdId = 0x444;
 	txHeader.IDE = CAN_ID_STD;
 	txHeader.RTR = CAN_RTR_DATA;
 	txHeader.DLC = 8;
@@ -487,54 +576,121 @@ void send_rx_data() {
 	 }
 }
 
-
+uint8_t expect_custom_input = 0;
 void choice_handler(uint8_t choice){
 	if (choice == 1) {
-		init_complete = 0;
+		default_init();
+		expect_custom_input = 1;
 	}
 	else if (choice == 2) {
 		default_init();
 		init_complete = 1;
-		send_struct(0x123, &battery_config, sizeof(battery_config));
+		send_struct(0x222, &battery_config, sizeof(battery_config));
 	}
 	else if (choice == 3) {
-		//send_first_message();
+		send_first_message();
 		init_complete = 0;
 	}
 }
 
 
-void default_init() {                                         // CODE FOR DEFAULT INITIALIZATION OF THE BMS
-	battery_config.battery_capacity_ah = 100.0f;
-	battery_config.num_cells = 3;
+void default_init(void) {
+    battery_config.battery_capacity_ah = 100;
+    battery_config.num_cells = 3;
 
-	battery_config.cell_capacity_ah[0] = 33.3f;
-	battery_config.cell_capacity_ah[1] = 33.3f;
-	battery_config.cell_capacity_ah[2] = 33.3f;
+    battery_config.cell0_capacity_ah = 30;
+    battery_config.cell1_capacity_ah = 30;
+    battery_config.cell2_capacity_ah = 40;
 
-	battery_config.cell_power_rating[0] = 50.0f;
-	battery_config.cell_power_rating[1] = 50.0f;
-	battery_config.cell_power_rating[2] = 50.0f;
+    battery_config.cell0_power_rating = 200;
+    battery_config.cell1_power_rating = 200;
+    battery_config.cell2_power_rating = 250;
 
-	battery_config.degradation_rate[0] = 0.001f;
-	battery_config.degradation_rate[1] = 0.001f;
-	battery_config.degradation_rate[2] = 0.001f;
+    battery_config.initial_soc0 = 100;
+    battery_config.initial_soc1 = 100;
+    battery_config.initial_soc2 = 100;
 
-	battery_config.initial_soc[0] = 100.0f;
-	battery_config.initial_soc[1] = 100.0f;
-	battery_config.initial_soc[2] = 100.0f;
+    battery_config.initial_soh0 = 100;
+    battery_config.initial_soh1 = 100;
+    battery_config.initial_soh2 = 100;
 
-	battery_config.initial_soh[0] = 100.0f;
-	battery_config.initial_soh[1] = 100.0f;
-	battery_config.initial_soh[2] = 100.0f;
+    battery_config.degradation_rate0 = 1;
+    battery_config.degradation_rate1 = 1;
+    battery_config.degradation_rate2 = 1;
 
-	battery_config.max_charge_current = 50.0f;
-	battery_config.max_discharge_current = 100.0f;
+    battery_config.max_discharge_current = 120;
+    battery_config.max_charge_current = 100;
 
-	battery_status.pack_soc = 100.0f;
-	battery_status.pack_soh = 100.0f;
-	battery_status.pack_temperature = 27.0f;
+    battery_status.pack_soc = 100;
+    battery_status.pack_soh = 100;
+    battery_status.cell0_soc = 100;
+    battery_status.cell1_soc = 100;
+    battery_status.cell2_soc = 100;
+    battery_status.cell0_soh = 100;
+    battery_status.cell1_soh = 100;
+    battery_status.cell2_soh = 100;
+    battery_status.pack_temperature = 25;
+    battery_status.pack_current = 0;
+    battery_status.pack_range = 300;
+    battery_status.fault_flags = 0;
+
+    inputdata.acceleration = 0;
 }
+
+void calculate_outputs(void) {
+    int full_range = 300;
+    static uint32_t last_temp_tick = 0;
+    static uint32_t last_soc_tick  = 0;
+    static uint32_t last_soh_tick  = 0;
+    uint32_t now = HAL_GetTick();
+
+    // 1. Current draw based on acceleration
+    battery_status.pack_current = (battery_config.max_discharge_current * inputdata.acceleration) / 100;
+
+    // 2. Temperature rise: +1°C every 2 sec
+    if (now - last_temp_tick >= 2000) {
+        battery_status.pack_temperature += 1;
+        last_temp_tick = now;
+    }
+
+    // 3. SOC drop: -1% every 3 sec
+    if (now - last_soc_tick >= 3000) {
+        battery_status.pack_soc -= 1;
+        if (battery_status.pack_soc < 0) battery_status.pack_soc = 0;
+        update_cell_soc();
+        last_soc_tick = now;
+    }
+
+    // 4. SOH drop: -1% every 5 sec
+    if (now - last_soh_tick >= 5000) {
+        battery_status.pack_soh -= 1;
+        if (battery_status.pack_soh < 0) battery_status.pack_soh = 0;
+        update_cell_soh();
+        last_soh_tick = now;
+    }
+
+    // 5. Range calculation
+    battery_status.pack_range = (full_range * battery_status.pack_soc) / 100;
+
+    // 6. Fault flag checks
+    battery_status.fault_flags = 0;
+
+    if (battery_status.pack_temperature > 70)
+        battery_status.fault_flags |= (1 << 0); // Over-temp
+    if (battery_status.pack_temperature < 0)
+        battery_status.fault_flags |= (1 << 1); // Under-temp
+    if (battery_status.pack_soc < 10)
+        battery_status.fault_flags |= (1 << 2); // Low SOC
+    if (battery_status.pack_soh < 70)
+        battery_status.fault_flags |= (1 << 3); // Low SOH
+    if (battery_status.pack_current >
+        battery_config.max_discharge_current)
+        battery_status.fault_flags |= (1 << 4); // Over-current
+    if (battery_status.pack_current < -battery_config.max_charge_current)
+        battery_status.fault_flags |= (1 << 5); // Reverse/Charge fault
+}
+
+
 
 
 void send_struct(uint32_t id, void *data, uint16_t size) {
@@ -560,56 +716,85 @@ void send_struct(uint32_t id, void *data, uint16_t size) {
 }
 
 
-void calculate_outputs() {
-    static uint32_t last_degradation_tick = 0;
-    static uint32_t last_temp_tick = 0;
-    float delta_time_sec = 2.0f; // since we call every 2 sec
+void custom_input_handler(uint8_t* rxdata) {
+    static uint8_t frame_count = 0;
 
-    // 1. Current draw based on acceleration
-    float current_draw = battery_config.max_discharge_current * (inputdata.acceleration / 100.0f);
-    battery_status.pack_current = current_draw;
+    switch (frame_count) {
+        case 0:
+            memcpy(&battery_config.battery_capacity_ah, &rxdata[0], 4);
+            memcpy(&battery_config.num_cells, &rxdata[4], 4);
+            frame_count++;
+            break;
 
-    // 2. Pack SOC
-    float soc_delta = (current_draw * delta_time_sec / 3600.0f) / battery_config.battery_capacity_ah * 100.0f;
-    battery_status.pack_soc -= soc_delta;
-    if(battery_status.pack_soc < 0) battery_status.pack_soc = 0;
-    if(battery_status.pack_soc > 100) battery_status.pack_soc = 100;
+        case 1:
+            memcpy(&battery_config.cell0_capacity_ah, &rxdata[0], 4);
+            memcpy(&battery_config.cell1_capacity_ah, &rxdata[4], 4);
+            frame_count++;
+            break;
 
-    // 2a. Cell SOC
-    for(int i = 0; i < battery_config.num_cells; i++) {
-        float cell_delta = (current_draw * delta_time_sec / 3600.0f) / battery_config.cell_capacity_ah[i] * 100.0f;
-        battery_status.cell_soc[i] -= cell_delta;
-        if(battery_status.cell_soc[i] < 0) battery_status.cell_soc[i] = 0;
-        if(battery_status.cell_soc[i] > 100) battery_status.cell_soc[i] = 100;
+        case 2:
+            memcpy(&battery_config.cell2_capacity_ah, &rxdata[0], 4);
+            memcpy(&battery_config.cell0_power_rating, &rxdata[4], 4);
+            frame_count++;
+            break;
+
+        case 3:
+            memcpy(&battery_config.cell1_power_rating, &rxdata[0], 4);
+            memcpy(&battery_config.cell2_power_rating, &rxdata[4], 4);
+            frame_count++;
+            break;
+
+        case 4:
+            memcpy(&battery_config.initial_soc0, &rxdata[0], 4);
+            memcpy(&battery_config.initial_soc1, &rxdata[4], 4);
+            frame_count++;
+            break;
+
+        case 5:
+            memcpy(&battery_config.initial_soc2, &rxdata[0], 4);
+            memcpy(&battery_config.initial_soh0, &rxdata[4], 4);
+            frame_count++;
+            break;
+
+        case 6:
+            memcpy(&battery_config.initial_soh1, &rxdata[0], 4);
+            memcpy(&battery_config.initial_soh2, &rxdata[4], 4);
+            frame_count++;
+            break;
+
+        case 7:
+            memcpy(&battery_config.degradation_rate0, &rxdata[0], 4);
+            memcpy(&battery_config.degradation_rate1, &rxdata[4], 4);
+            frame_count++;
+            break;
+
+        case 8:
+            memcpy(&battery_config.degradation_rate2, &rxdata[0], 4);
+            memcpy(&battery_config.max_discharge_current, &rxdata[4], 4);
+            frame_count++;
+            break;
+
+        case 9:
+            memcpy(&battery_config.max_charge_current, &rxdata[0], 4);
+            frame_count = 0;
+            send_struct(0x222, &battery_config, sizeof(battery_config));
+            init_complete = 1;
+            break;
     }
+}
 
-    // 3. Range
-    float full_range = 300.0f;
-    battery_status.pack_range = full_range * (battery_status.pack_soc / 100.0f);
 
-    // 4. SOH degradation every 15 seconds
-    last_degradation_tick += 2000;
-    if(last_degradation_tick >= 15000) {
-        for(int i = 0; i < battery_config.num_cells; i++) {
-            float usage_factor = (100.0f - battery_status.cell_soc[i]) / 100.0f;
-            battery_status.cell_soh[i] -= battery_config.degradation_rate[i] * usage_factor;
-            if(battery_status.cell_soh[i] < 0) battery_status.cell_soh[i] = 0;
-        }
 
-        float soh_sum = 0;
-        for(int i = 0; i < battery_config.num_cells; i++)
-            soh_sum += battery_status.cell_soh[i];
-        battery_status.pack_soh = soh_sum / battery_config.num_cells;
+void update_cell_soh(void) {
+    battery_status.cell0_soh = battery_status.pack_soh;
+    battery_status.cell1_soh = battery_status.pack_soh;
+    battery_status.cell2_soh = battery_status.pack_soh;
+}
 
-        last_degradation_tick = 0;
-    }
-
-    // 5. Temperature rise every 10 sec by 2°C
-    last_temp_tick += 2000;
-    if(last_temp_tick >= 10000) {
-        battery_status.pack_temperature += 2.0f;
-        last_temp_tick = 0;
-    }
+void update_cell_soc(void) {
+    battery_status.cell0_soc = battery_status.pack_soc;
+    battery_status.cell1_soc = battery_status.pack_soc;
+    battery_status.cell2_soc = battery_status.pack_soc;
 }
 /* USER CODE END 4 */
 
