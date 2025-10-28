@@ -133,7 +133,7 @@ BatteryStatus battery_status;
 // CONTINUOUS INPUTS VIRTUAL/USER
 
 typedef struct {
-	int acceleration;
+	uint8_t acceleration;
 } InputData;
 
 InputData inputdata;
@@ -247,7 +247,7 @@ int main(void)
     /* USER CODE END WHILE */
 	  new_time = HAL_GetTick();
 	  calculate_outputs();
-	  if (new_time - last_time >= 2500) {
+	  if (new_time - last_time >= 1500) {
 		  if(init_complete) send_status_data();
 		  else {
 			  config_counter = HAL_GetTick();
@@ -607,9 +607,9 @@ void default_init(void) {
     battery_config.battery_capacity_ah = 100;
     battery_config.num_cells = 3;
 
-    battery_config.cell0_capacity_ah = 30;
-    battery_config.cell1_capacity_ah = 30;
-    battery_config.cell2_capacity_ah = 30;
+    battery_config.cell0_capacity_ah = 33;
+    battery_config.cell1_capacity_ah = 33;
+    battery_config.cell2_capacity_ah = 33;
 
     battery_config.cell0_power_rating = 200;
     battery_config.cell1_power_rating = 200;
@@ -638,9 +638,9 @@ void default_init(void) {
     battery_status.cell0_soh = 100;
     battery_status.cell1_soh = 100;
     battery_status.cell2_soh = 100;
-    battery_status.pack_temperature = 25;
+    battery_status.pack_temperature = 0;
     battery_status.pack_current = 0;
-    battery_status.pack_range = 0xC8;
+    battery_status.pack_range = 200;
     battery_status.fault_flags = 0;
 
     inputdata.acceleration = 0;
@@ -658,35 +658,37 @@ void calculate_outputs(void) {
 
     // 2. Temperature rise: +1°C every 2 sec
     if (now - last_temp_tick >= 1000) {
-        battery_status.pack_temperature += 1;
+    	if (battery_status.pack_temperature >= 250) battery_status.pack_temperature = 250;
+    	else battery_status.pack_temperature += 1;
         last_temp_tick = now;
     }
 
     // 3. SOC drop: -1% every 3 sec
-    if (now - last_soc_tick >= 2000) {
-        battery_status.pack_soc -= 1;
-        if (battery_status.pack_soc < 0) battery_status.pack_soc = 0;
+    if (now - last_soc_tick >= 1500) {
+        if (battery_status.pack_soc)battery_status.pack_soc -= 1;
+        if (battery_status.pack_soc <= 0) battery_status.pack_soc = 0;
         update_cell_soc();
         last_soc_tick = now;
     }
 
     // 4. SOH drop: -1% every 5 sec
-    if (now - last_soh_tick >= 4000) {
-        battery_status.pack_soh -= 1;
-        if (battery_status.pack_soh < 0) battery_status.pack_soh = 0;
+    if (now - last_soh_tick >= 2000) {
+        if(battery_status.pack_soh)battery_status.pack_soh -= 1;
+        if (battery_status.pack_soh <= 0) battery_status.pack_soh = 0;
         update_cell_soh();
         last_soh_tick = now;
     }
 
     // 5. Range calculation
-    battery_status.pack_range = (full_range * battery_status.pack_soc) / 100;
+    if (battery_status.pack_range <= 0) battery_status.pack_range = 0;
+    else battery_status.pack_range = (full_range * battery_status.pack_soc) / 100;
 
     // 6. Fault flag checks
     battery_status.fault_flags = 0;
 
     if (battery_status.pack_temperature > 50)
         battery_status.fault_flags |= (1 << 0); // Over-temp
-    if (battery_status.pack_temperature < 0)
+    if (battery_status.pack_temperature < 10)
         battery_status.fault_flags |= (1 << 1); // Under-temp
     if (battery_status.pack_soc < 30)
         battery_status.fault_flags |= (1 << 2); // Low SOC
@@ -695,8 +697,8 @@ void calculate_outputs(void) {
     if (battery_status.pack_current >
         battery_config.max_discharge_current)
         battery_status.fault_flags |= (1 << 4); // Over-current
-    if (battery_status.pack_current < -battery_config.max_charge_current)
-        battery_status.fault_flags |= (1 << 5); // Reverse/Charge fault
+    if (battery_status.pack_range <= 5)
+    	battery_status.fault_flags |= (1<<5); // range
 }
 
 
@@ -767,6 +769,14 @@ void send_status_data() {
     memcpy(txData, &battery_status.fault_flags, 4);
     while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0);
     HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
+
+    txHeader.StdId = id++;
+    txHeader.DLC = 1;
+    memset(txData, 0, 8);
+    txData[0] = inputdata.acceleration;
+    while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0);
+    HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
+
 }
 
 
