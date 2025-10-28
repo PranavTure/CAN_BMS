@@ -5,39 +5,41 @@
 /*
  * 		TRANSMISSIONS
  *
- *		0x001 : Input acceleration structure
- * 		0x111 : First choice message
- * 		0x222 : Battery configurations
- * 		0x333 : Battery Status
- * 		0x444 : mirror Rx data
- *
- * 		0x201 : update temperature
- * 		0x202 : update SOH
- * 		0x203 : update SOC
- *
- * 		0x211 : update degradation_rate cell [0]
- * 		0x212 : u d r cell[1]
- * 		0x213 : udr cell[2]
- *
- *
- *
- *
- * 		RECEPTION
- *
- * 		0x555 : Receive user's choice
- * 		0x666 : Acceleration
- * 		0x777 : config data
- *
- *
- * 		FAULT FLAG BIT MAPINGS
- *
- *     0th bit : LOW SOC < 20 %
- *     1st bit : Over temperature > 60;
- *     2nd bit : under temperature fault < 0
- *     3rd bit : LOW SOH of battery < 70 %
- *     4th bit : Over current fault (pack current > max discharge current)
- *     5-6 th  : Indicate which cell has degraded beyond the limit
- *     7th bit : general fault if any fault flag is set
+ *		0x001 – Sends the first message (choice prompt: default/custom/init reset).
+
+		0x100 – Sends the battery configuration structure (split into multiple 8-byte CAN frames).
+
+		0x201–0x20A – Send battery status values like SOC, SOH, current, range, and others (each frame holds 1 byte).
+
+		0x20B – Sends pack temperature (4 bytes).
+
+		0x20C – Sends fault flags (4 bytes).
+
+		0x444 – Sends a mirror of the last received CAN data (for debugging).
+
+
+
+
+		RECEIVING
+
+		0x300 – Receives choice message to trigger default/custom/init reset.
+
+		0x301 – Receives acceleration input, updates PWM accordingly.
+
+		0x302 – Receives pack temperature data.
+
+		0x303 – Receives pack SOC data and updates all cells.
+
+		0x304 – Receives pack SOH data and updates all cells.
+
+		0x305 – Receives degradation rate for cell 0 (not implemented yet).
+
+		0x306 – Receives degradation rate for cell 1 (not implemented yet).
+
+		0x307 – Receives degradation rate for cell 2 (not implemented yet).
+
+		0x777 – Reserved for custom initialization input (currently commented).
+
  */
 
 
@@ -74,55 +76,57 @@
 // DECLARATION OF USER CONFIG FUNCTIONS;
 
 typedef struct {
-    int battery_capacity_ah;
-    int num_cells;
+    uint8_t battery_capacity_ah;
+    uint8_t num_cells;
 
-    int cell0_capacity_ah;
-    int cell1_capacity_ah;
-    int cell2_capacity_ah;
+    uint8_t cell0_capacity_ah;
+    uint8_t cell1_capacity_ah;
+    uint8_t cell2_capacity_ah;
 
-    int cell0_power_rating;
-    int cell1_power_rating;
-    int cell2_power_rating;
+    uint8_t cell0_power_rating;
+    uint8_t cell1_power_rating;
+    uint8_t cell2_power_rating;
 
-    int initial_soc0;
-    int initial_soc1;
-    int initial_soc2;
+    uint8_t initial_soc0;
+    uint8_t initial_soc1;
+    uint8_t initial_soc2;
 
-    int initial_soh0;
-    int initial_soh1;
-    int initial_soh2;
+    uint8_t initial_soh0;
+    uint8_t initial_soh1;
+    uint8_t initial_soh2;
 
-    int degradation_rate0;
-    int degradation_rate1;
-    int degradation_rate2;
+    uint8_t degradation_rate0;
+    uint8_t degradation_rate1;
+    uint8_t degradation_rate2;
 
-    int max_discharge_current;
-    int max_charge_current;
+    uint8_t max_discharge_current;
+    uint8_t max_charge_current;
 } BatteryConfig;
+
 
 BatteryConfig battery_config;
 
 // DECLARATION OF OUTPUT VARIABLES
 
 typedef struct {
-    int pack_soc;
-    int pack_soh;
+    uint8_t pack_soc;
+    uint8_t pack_soh;
 
-    int cell0_soc;
-    int cell1_soc;
-    int cell2_soc;
+    uint8_t cell0_soc;
+    uint8_t cell1_soc;
+    uint8_t cell2_soc;
 
-    int cell0_soh;
-    int cell1_soh;
-    int cell2_soh;
+    uint8_t cell0_soh;
+    uint8_t cell1_soh;
+    uint8_t cell2_soh;
 
-    int pack_current;
-    int pack_temperature;
-    int pack_range;
+    uint8_t pack_current;
+    uint8_t pack_range;
 
-    uint32_t fault_flags;
+    int pack_temperature;     // keep as 4 bytes
+    uint32_t fault_flags;     // keep as 4 bytes
 } BatteryStatus;
+
 
 BatteryStatus battery_status;
 
@@ -172,7 +176,10 @@ void send_first_message(void);
 void test_pwm(void);
 
 void send_rx_data(void);
-void send_struct(uint32_t id, void *data, uint16_t size);
+void send_data(uint32_t id, void *data, uint16_t size);
+
+void send_config_data(void);
+void send_status_data(void);
 
 void choice_handler(uint8_t choice);
 void custom_input_handler(uint8_t* rxdata);
@@ -241,7 +248,7 @@ int main(void)
 	  new_time = HAL_GetTick();
 	  calculate_outputs();
 	  if (new_time - last_time >= 2500) {
-		  if(init_complete) send_struct(0x333, &battery_status, sizeof(battery_status));
+		  if(init_complete) send_status_data();
 		  else {
 			  config_counter = HAL_GetTick();
 			  if(config_counter - config_counter_last >= 10000){
@@ -457,16 +464,15 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
 
         switch (rxHeader.StdId) {
 
-            case 0x555: {                                 // 0x555 : choose CUSTOM or DEFAULT init
+            case 0x300: {                                 // 0x555 : choose CUSTOM or DEFAULT init
                 choice_handler(rxData[0]);
                 break;
             }
 
-            case 0x666: {                                 // 0x666 : vehicle acceleration input
+            case 0x301: {                                 // 0x666 : vehicle acceleration input
                 inputdata.acceleration = (int)rxData[0];
                 uint32_t pwm_val = (uint32_t)((inputdata.acceleration / 100.0f) * 65535);
                 __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, pwm_val);
-                send_struct(0x001, &inputdata, sizeof(inputdata));
                 break;
             }
 
@@ -476,35 +482,35 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
                 break;
             }
 
-            case 0x201: {                                 // 0x201 : set pack temperature
+            case 0x302: {                                 // 0x201 : set pack temperature
                 battery_status.pack_temperature = (int)(rxData[0]);
                 break;
             }
 
-            case 0x202: {                                 // 0x202 : set pack SOH
+            case 0x303: {                                 // 0x202 : set pack SOH
                 battery_status.pack_soc = (int)rxData[0];
                 update_cell_soh();
                 break;
             }
 
-            case 0x203: {                                 // 0x203 : set pack SOC
+            case 0x304: {                                 // 0x203 : set pack SOC
                 battery_status.pack_soh = (int)rxData[0];
                 update_cell_soc();
                 break;
             }
 
-            case 0x211: {                                 // 0x211 : set degradation rate for cell 0
-                memcpy(&battery_config.degradation_rate0, &rxData[0], sizeof(int));
+            case 0x305: {                                 // 0x211 : set degradation rate for cell 0
+
                 break;
             }
 
-            case 0x212: {                                 // 0x212 : set degradation rate for cell 1
-                memcpy(&battery_config.degradation_rate1, &rxData[0], sizeof(int));
+            case 0x306: {                                 // 0x212 : set degradation rate for cell 1
+
                 break;
             }
 
-            case 0x213: {                                 // 0x213 : set degradation rate for cell 2
-                memcpy(&battery_config.degradation_rate2, &rxData[0], sizeof(int));
+            case 0x307: {                                 // 0x213 : set degradation rate for cell 2
+
                 break;
             }
         }
@@ -535,10 +541,12 @@ void send_first_message() {				// first message to get the choice selection
 	uint8_t txChoiceData[8] = {1, 12, 2, 13, 3, 15, 0, 0};
 	uint32_t txMailbox = 0;
 
-	txheader.StdId = 0x111;                      // 0x111 TO send choice to the receiver
+	txheader.StdId = 0x001;                      // 0x111 TO send choice to the receiver
 	txheader.IDE = CAN_ID_STD;
 	txheader.RTR = CAN_RTR_DATA;
 	txheader.DLC = 8;
+
+	while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0);
 
 	if (HAL_CAN_AddTxMessage(&hcan1, &txheader, txChoiceData, &txMailbox) != HAL_OK) {
 		Error_Handler();
@@ -581,11 +589,12 @@ void choice_handler(uint8_t choice){
 	if (choice == 1) {
 		default_init();
 		expect_custom_input = 1;
+		send_data(0x100, &battery_config, sizeof(battery_config));
 	}
 	else if (choice == 2) {
 		default_init();
 		init_complete = 1;
-		send_struct(0x222, &battery_config, sizeof(battery_config));
+		send_data(0x100, &battery_config, sizeof(battery_config));
 	}
 	else if (choice == 3) {
 		send_first_message();
@@ -600,11 +609,11 @@ void default_init(void) {
 
     battery_config.cell0_capacity_ah = 30;
     battery_config.cell1_capacity_ah = 30;
-    battery_config.cell2_capacity_ah = 40;
+    battery_config.cell2_capacity_ah = 30;
 
     battery_config.cell0_power_rating = 200;
     battery_config.cell1_power_rating = 200;
-    battery_config.cell2_power_rating = 250;
+    battery_config.cell2_power_rating = 200;
 
     battery_config.initial_soc0 = 100;
     battery_config.initial_soc1 = 100;
@@ -631,7 +640,7 @@ void default_init(void) {
     battery_status.cell2_soh = 100;
     battery_status.pack_temperature = 25;
     battery_status.pack_current = 0;
-    battery_status.pack_range = 300;
+    battery_status.pack_range = 0xC8;
     battery_status.fault_flags = 0;
 
     inputdata.acceleration = 0;
@@ -648,13 +657,13 @@ void calculate_outputs(void) {
     battery_status.pack_current = (battery_config.max_discharge_current * inputdata.acceleration) / 100;
 
     // 2. Temperature rise: +1°C every 2 sec
-    if (now - last_temp_tick >= 2000) {
+    if (now - last_temp_tick >= 1000) {
         battery_status.pack_temperature += 1;
         last_temp_tick = now;
     }
 
     // 3. SOC drop: -1% every 3 sec
-    if (now - last_soc_tick >= 3000) {
+    if (now - last_soc_tick >= 2000) {
         battery_status.pack_soc -= 1;
         if (battery_status.pack_soc < 0) battery_status.pack_soc = 0;
         update_cell_soc();
@@ -662,7 +671,7 @@ void calculate_outputs(void) {
     }
 
     // 4. SOH drop: -1% every 5 sec
-    if (now - last_soh_tick >= 5000) {
+    if (now - last_soh_tick >= 4000) {
         battery_status.pack_soh -= 1;
         if (battery_status.pack_soh < 0) battery_status.pack_soh = 0;
         update_cell_soh();
@@ -675,11 +684,11 @@ void calculate_outputs(void) {
     // 6. Fault flag checks
     battery_status.fault_flags = 0;
 
-    if (battery_status.pack_temperature > 70)
+    if (battery_status.pack_temperature > 50)
         battery_status.fault_flags |= (1 << 0); // Over-temp
     if (battery_status.pack_temperature < 0)
         battery_status.fault_flags |= (1 << 1); // Under-temp
-    if (battery_status.pack_soc < 10)
+    if (battery_status.pack_soc < 30)
         battery_status.fault_flags |= (1 << 2); // Low SOC
     if (battery_status.pack_soh < 70)
         battery_status.fault_flags |= (1 << 3); // Low SOH
@@ -692,27 +701,72 @@ void calculate_outputs(void) {
 
 
 
-
-void send_struct(uint32_t id, void *data, uint16_t size) {
+void send_data(uint32_t id, void *data, uint16_t size) {
     CAN_TxHeaderTypeDef txHeader;
     uint32_t txMailbox;
+    const uint8_t *bytes = (const uint8_t*)data;
     uint8_t txData[8];
-    uint8_t *ptr = (uint8_t*)data;
-    uint8_t num_frames = (size + 7) / 8;
 
     txHeader.StdId = id;
     txHeader.IDE = CAN_ID_STD;
     txHeader.RTR = CAN_RTR_DATA;
     txHeader.DLC = 8;
 
-    for (uint8_t i = 0; i < num_frames; i++) {
-        uint8_t len = (i == num_frames - 1) ? (size - i * 8) : 8;
-        memcpy(txData, ptr + (i * 8), len);
-        if (len < 8) memset(txData + len, 0, 8 - len);
+    uint8_t num_frames = (size + 7) / 8;
 
+    for (uint8_t frame = 0; frame < num_frames; frame++) {
+        uint8_t len = (frame == num_frames - 1) ? (size - frame * 8) : 8;
+
+        // Copy only valid bytes, pad remaining with zeros
+        memset(txData, 0, sizeof(txData));
+        memcpy(txData, bytes + (frame * 8), len);
+
+        // Wait until a CAN mailbox is free
+        while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0);
+
+        // Optionally: modify ID per frame (to preserve order)
+        // Transmit frame
+        HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
+
+    }
+}
+
+
+void send_status_data() {
+    CAN_TxHeaderTypeDef txHeader;
+    uint32_t txMailbox;
+    uint8_t txData[8] = {0};
+    uint16_t id = 0x201;  // starting CAN ID
+
+    txHeader.IDE = CAN_ID_STD;
+    txHeader.RTR = CAN_RTR_DATA;
+
+    // --- 1️⃣ Send 9 uint8_t variables (SOC/SOH/Current/Range) ---
+    // (pack_soc to pack_range, excluding temperature)
+    uint8_t *vars = (uint8_t *)&battery_status; // assuming first 9 ints were converted to uint8_t
+    uint8_t num_vars = 10; // pack_soc to pack_range (10 total: 0–9)
+
+    for (uint8_t i = 0; i < num_vars; i++) {
+        txHeader.StdId = id++;
+        txHeader.DLC = 1;
+        txData[0] = vars[i];
         while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0);
         HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
     }
+
+    // --- 2️⃣ Send pack_temperature (int = 4 bytes) ---
+    txHeader.StdId = id++;
+    txHeader.DLC = 4;
+    memcpy(txData, &battery_status.pack_temperature, 4);
+    while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0);
+    HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
+
+    // --- 3️⃣ Send fault_flags (uint32_t = 4 bytes) ---
+    txHeader.StdId = id++;
+    txHeader.DLC = 4;
+    memcpy(txData, &battery_status.fault_flags, 4);
+    while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0);
+    HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
 }
 
 
@@ -721,67 +775,41 @@ void custom_input_handler(uint8_t* rxdata) {
 
     switch (frame_count) {
         case 0:
-            memcpy(&battery_config.battery_capacity_ah, &rxdata[0], 4);
-            memcpy(&battery_config.num_cells, &rxdata[4], 4);
+            battery_config.battery_capacity_ah = rxdata[0];
+            battery_config.num_cells = rxdata[1];
+            battery_config.cell0_capacity_ah = rxdata[2];
+            battery_config.cell1_capacity_ah = rxdata[3];
+            battery_config.cell2_capacity_ah = rxdata[4];
+            battery_config.cell0_power_rating = rxdata[5];
+            battery_config.cell1_power_rating = rxdata[6];
+            battery_config.cell2_power_rating = rxdata[7];
             frame_count++;
             break;
 
         case 1:
-            memcpy(&battery_config.cell0_capacity_ah, &rxdata[0], 4);
-            memcpy(&battery_config.cell1_capacity_ah, &rxdata[4], 4);
+            battery_config.initial_soc0 = rxdata[0];
+            battery_config.initial_soc1 = rxdata[1];
+            battery_config.initial_soc2 = rxdata[2];
+            battery_config.initial_soh0 = rxdata[3];
+            battery_config.initial_soh1 = rxdata[4];
+            battery_config.initial_soh2 = rxdata[5];
+            battery_config.degradation_rate0 = rxdata[6];
+            battery_config.degradation_rate1 = rxdata[7];
             frame_count++;
             break;
 
         case 2:
-            memcpy(&battery_config.cell2_capacity_ah, &rxdata[0], 4);
-            memcpy(&battery_config.cell0_power_rating, &rxdata[4], 4);
-            frame_count++;
-            break;
+            battery_config.degradation_rate2   = rxdata[0];
+            battery_config.max_discharge_current = rxdata[1];
+            battery_config.max_charge_current = rxdata[2];
 
-        case 3:
-            memcpy(&battery_config.cell1_power_rating, &rxdata[0], 4);
-            memcpy(&battery_config.cell2_power_rating, &rxdata[4], 4);
-            frame_count++;
-            break;
-
-        case 4:
-            memcpy(&battery_config.initial_soc0, &rxdata[0], 4);
-            memcpy(&battery_config.initial_soc1, &rxdata[4], 4);
-            frame_count++;
-            break;
-
-        case 5:
-            memcpy(&battery_config.initial_soc2, &rxdata[0], 4);
-            memcpy(&battery_config.initial_soh0, &rxdata[4], 4);
-            frame_count++;
-            break;
-
-        case 6:
-            memcpy(&battery_config.initial_soh1, &rxdata[0], 4);
-            memcpy(&battery_config.initial_soh2, &rxdata[4], 4);
-            frame_count++;
-            break;
-
-        case 7:
-            memcpy(&battery_config.degradation_rate0, &rxdata[0], 4);
-            memcpy(&battery_config.degradation_rate1, &rxdata[4], 4);
-            frame_count++;
-            break;
-
-        case 8:
-            memcpy(&battery_config.degradation_rate2, &rxdata[0], 4);
-            memcpy(&battery_config.max_discharge_current, &rxdata[4], 4);
-            frame_count++;
-            break;
-
-        case 9:
-            memcpy(&battery_config.max_charge_current, &rxdata[0], 4);
             frame_count = 0;
-            send_struct(0x222, &battery_config, sizeof(battery_config));
+            send_config_data();   // optional confirmation transmit
             init_complete = 1;
             break;
     }
 }
+
 
 
 
